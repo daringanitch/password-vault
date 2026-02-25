@@ -81,7 +81,13 @@ curl -s -H "Authorization: Bearer <token>" \
 
 ## Docker
 
-### Build the image
+### Pull from GitHub Container Registry
+
+```bash
+docker pull ghcr.io/daringanitch/password-vault:latest
+```
+
+### Build the image locally
 
 ```bash
 docker build -t password-vault .
@@ -95,7 +101,7 @@ The image uses a two-stage build. The final image is based on `alpine:3.19` and 
 
 ```bash
 # 1. Generate a master key (first time only)
-docker run --rm password-vault vault-cli init
+docker run --rm --entrypoint vault-cli ghcr.io/daringanitch/password-vault init
 # → prints VAULT_MASTER_KEY=...
 
 # 2. Export the key
@@ -153,7 +159,9 @@ make docker-compose-down    # stop
 
 | Property | Value |
 |----------|-------|
+| Registry | `ghcr.io/daringanitch/password-vault` |
 | Base image | `alpine:3.19` |
+| Image size | ~12 MB |
 | User | `vault` (non-root) |
 | Filesystem | Read-only (only `/vault/data` volume is writable) |
 | Capabilities | All dropped |
