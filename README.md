@@ -21,6 +21,7 @@ sqlite3 vault.db "SELECT *…"  → UUIDs, HMAC hashes, AES-GCM blobs only
 
 - [Security Model](#security-model)
 - [Quick Start](#quick-start)
+- [Docker](#docker)
 - [API Reference](#api-reference)
 - [CLI Reference](#cli-reference)
 - [Configuration](#configuration)
@@ -74,6 +75,92 @@ curl -s -H "Authorization: Bearer <token>" \
   http://localhost:8080/secret/github_token
 # → {"value":"ghp_xxx"}
 ```
+
+---
+
+## Docker
+
+### Build the image
+
+```bash
+docker build -t password-vault .
+# or
+make docker-build
+```
+
+The image uses a two-stage build. The final image is based on `alpine:3.19` and contains only the two binaries — no Go toolchain, no source. The vault runs as a non-root user (`vault`) with a read-only root filesystem.
+
+### Run with Docker
+
+```bash
+# 1. Generate a master key (first time only)
+docker run --rm password-vault vault-cli init
+# → prints VAULT_MASTER_KEY=...
+
+# 2. Export the key
+export VAULT_MASTER_KEY=<key-from-above>
+
+# 3. Add a secret (admin operation via vault-cli)
+docker run --rm \
+  -e VAULT_MASTER_KEY \
+  -v vault-data:/vault/data \
+  --entrypoint vault-cli \
+  password-vault secret add --key "db_password" --value "hunter2"
+
+# 4. Create an access token
+docker run --rm \
+  -e VAULT_MASTER_KEY \
+  -v vault-data:/vault/data \
+  --entrypoint vault-cli \
+  password-vault token create --name "ci-runner"
+
+# 5. Start the API server
+docker run -d \
+  --name vault \
+  -p 8080:8080 \
+  -e VAULT_MASTER_KEY \
+  -v vault-data:/vault/data \
+  password-vault
+```
+
+### Run with Docker Compose
+
+```bash
+# Start the API server (VAULT_MASTER_KEY must be exported or in .env)
+export VAULT_MASTER_KEY=<key>
+docker compose up -d
+
+# Run admin commands via the vault-cli service
+docker compose run --rm vault-cli token list
+docker compose run --rm vault-cli secret add --key "api_key" --value "sk-xxx"
+
+# Stop
+docker compose down
+```
+
+### Makefile shortcuts
+
+```bash
+make docker-build           # build image
+make docker-run             # run server (requires VAULT_MASTER_KEY)
+make docker-cli CMD="token list"   # run any vault-cli command
+make docker-compose-up      # start via docker compose
+make docker-compose-down    # stop
+```
+
+### Image details
+
+| Property | Value |
+|----------|-------|
+| Base image | `alpine:3.19` |
+| User | `vault` (non-root) |
+| Filesystem | Read-only (only `/vault/data` volume is writable) |
+| Capabilities | All dropped |
+| Exposed port | `8080` |
+| Default volume | `/vault/data` (mount here for persistence) |
+| `VAULT_DB_PATH` default | `/vault/data/vault.db` |
+
+> **Never bake `VAULT_MASTER_KEY` into the image.** Always inject it at runtime via `-e` or a secrets manager (Docker Swarm secrets, Kubernetes secrets, AWS Secrets Manager, etc.).
 
 ---
 

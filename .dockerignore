@@ -1,0 +1,27 @@
+# Build artifacts
+bin/
+coverage.out
+*.test
+
+# Vault database and secrets — NEVER include these in the image
+*.db
+*.db-shm
+*.db-wal
+.env
+vault.db
+
+# Git history
+.git/
+.github/
+
+# Documentation (not needed in the image)
+docs/
+README.md
+*.md
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
