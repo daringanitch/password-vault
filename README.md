@@ -1,4 +1,5 @@
-# Password Vault
+# About
+Black-box Password Vault
 
 A cryptographically opaque secret store. No UI, no enumeration, no listing.
 Callers must know **both** a valid access token **and** the exact key name to retrieve any secret.
