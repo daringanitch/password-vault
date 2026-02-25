@@ -1,0 +1,19 @@
+# Binaries
+bin/
+*.exe
+
+# Vault database and secrets — NEVER commit these
+*.db
+*.db-shm
+*.db-wal
+.env
+vault.db
+
+# Test artifacts
+coverage.out
+
+# macOS
+.DS_Store
+
+# Go build cache
+*.test
