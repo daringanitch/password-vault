@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # required for provenance attestation
 
     steps:
       - uses: actions/checkout@v6
