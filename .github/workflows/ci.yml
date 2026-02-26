@@ -36,7 +36,7 @@ jobs:
 
       - name: Upload coverage report
         if: matrix.go == 'stable'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: coverage.out
@@ -69,7 +69,7 @@ jobs:
           bin/vault-cli --help
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: binaries-linux-amd64
           path: bin/
