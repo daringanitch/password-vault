@@ -23,7 +23,7 @@ jobs:
           cache: false  # go.sum not committed; caching handled manually below
 
       - name: Cache Go module cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/go/pkg/mod
           key: go-mod-${{ runner.os }}-${{ matrix.go }}-${{ hashFiles('go.mod') }}
@@ -62,7 +62,7 @@ jobs:
           cache: false  # go.sum not committed; caching handled manually below
 
       - name: Cache Go module cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/go/pkg/mod
           key: go-mod-${{ runner.os }}-1.24-${{ hashFiles('go.mod') }}
