@@ -1,26 +1,29 @@
-# About
-Black-box Password Vault
+# password-vault
 
-A cryptographically opaque secret store. No UI, no enumeration, no listing.
-Callers must know **both** a valid access token **and** the exact key name to retrieve any secret.
-If the database is stolen it is useless without the master key.
-If the master key is stolen, key names are still protected by HMAC — an attacker must brute-force every possible name.
+**A cryptographically opaque secret store. No UI, no enumeration, no listing.**
+
+Callers must know **both** a valid access token **and** the exact key name to retrieve any secret. The API has two endpoints. Admin operations are CLI-only. Even with the database file and the master key, an attacker cannot list what secrets exist.
 
 ```
 GET /secret/github_token
 Authorization: Bearer <token>
 → 200 {"value": "ghp_xxx"}
 
-GET /secret/nonexistent       → 404  (indistinguishable from bad token)
-GET /secrets                  → 404  (no listing endpoint)
-sqlite3 vault.db "SELECT *…"  → UUIDs, HMAC hashes, AES-GCM blobs only
+GET /secret/nonexistent   → 404  (identical to a bad token — by design)
+GET /secrets              → 404  (no listing endpoint exists)
+sqlite3 vault.db "SELECT *…"  → UUIDs, HMAC hashes, AES-GCM blobs
 ```
+
+[![Go](https://img.shields.io/badge/go-1.24-blue)](https://go.dev)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue)](https://ghcr.io/daringanitch/password-vault)
 
 ---
 
 ## Table of Contents
 
 - [Security Model](#security-model)
+- [How the Crypto Works](#how-the-crypto-works)
 - [Quick Start](#quick-start)
 - [Docker](#docker)
 - [API Reference](#api-reference)
@@ -35,13 +38,38 @@ sqlite3 vault.db "SELECT *…"  → UUIDs, HMAC hashes, AES-GCM blobs only
 
 | Threat | Defense |
 |--------|---------|
-| Database file stolen | All values encrypted with AES-256-GCM under a per-key derived key |
+| Database file stolen | All values encrypted AES-256-GCM with a per-secret derived key |
 | DB + master key stolen | Key names stored as `HMAC-SHA256(master_key, name)` — not reversible |
-| Access token stolen | Attacker still needs exact key names (no enumeration endpoint exists) |
-| Brute-force key names via API | Rate limiting (5 req/s per IP) + constant-time comparison |
-| Oracle attack (does key exist?) | Auth failure and missing key return identical `404 {"error":"not found"}` |
+| Access token stolen | Attacker still needs exact key names; no enumeration endpoint exists |
+| Brute-force via API | Per-IP rate limiting (5 req/s) + constant-time token comparison |
+| Oracle attack (does this key exist?) | Auth failure and missing key return identical `404 {"error":"not found"}` |
+| Container compromise | Non-root user, read-only root filesystem, all capabilities dropped |
 
-See [`docs/security.md`](docs/security.md) for a full breakdown of the cryptographic design.
+See [`docs/security.md`](docs/security.md) for the full cryptographic threat model.
+
+---
+
+## How the Crypto Works
+
+```
+WRITE PATH (vault-cli)
+──────────────────────
+key_name ──┬── HMAC-SHA256(master_key) ──→ key_hash  (stored in DB)
+           └── HKDF-SHA256(master_key, key_name, "vault-value") ──→ enc_key
+                                                                        │
+plaintext ──────────────────── AES-256-GCM(enc_key, random_nonce) ──→ blob (stored in DB)
+
+READ PATH (API)
+───────────────
+Bearer token ──→ SHA-256 lookup in DB ──→ Argon2id verify ──→ authenticated
+key_name     ──→ HMAC-SHA256(master_key) ──→ lookup blob ──→ HKDF derive enc_key ──→ decrypt ──→ plaintext
+```
+
+**Key properties:**
+- Every secret gets its own encryption key (HKDF binds the derived key to the secret name)
+- Nonces are randomly generated per encryption call — same value encrypted twice produces different blobs
+- Access tokens are Argon2id-hashed (`t=2, m=64MB, p=4`); raw tokens are never stored anywhere
+- A stolen database without the master key reveals nothing — no key names, no values
 
 ---
 
@@ -58,7 +86,19 @@ make build          # produces ./bin/vault and ./bin/vault-cli
 
 # 2. Initialize — generates a master key and creates vault.db
 ./bin/vault-cli init
+```
 
+```
+╔══════════════════════════════════════════════════════════════╗
+║              VAULT MASTER KEY — SAVE THIS NOW               ║
+╠══════════════════════════════════════════════════════════════╣
+║  VAULT_MASTER_KEY=abc123...
+╚══════════════════════════════════════════════════════════════╝
+```
+
+> The master key is shown **once**. There is no recovery mechanism if it is lost.
+
+```bash
 # 3. Export the printed key
 export VAULT_MASTER_KEY=<key-from-above>
 
@@ -87,39 +127,30 @@ curl -s -H "Authorization: Bearer <token>" \
 docker pull ghcr.io/daringanitch/password-vault:latest
 ```
 
-### Build the image locally
-
-```bash
-docker build -t password-vault .
-# or
-make docker-build
-```
-
-The image uses a two-stage build. The final image is based on `alpine:3.19` and contains only the two binaries — no Go toolchain, no source. The vault runs as a non-root user (`vault`) with a read-only root filesystem.
-
 ### Run with Docker
 
 ```bash
 # 1. Generate a master key (first time only)
-docker run --rm --entrypoint vault-cli ghcr.io/daringanitch/password-vault init
+docker run --rm --entrypoint vault-cli \
+  ghcr.io/daringanitch/password-vault init
 # → prints VAULT_MASTER_KEY=...
 
 # 2. Export the key
 export VAULT_MASTER_KEY=<key-from-above>
 
-# 3. Add a secret (admin operation via vault-cli)
+# 3. Add a secret
 docker run --rm \
   -e VAULT_MASTER_KEY \
   -v vault-data:/vault/data \
   --entrypoint vault-cli \
-  password-vault secret add --key "db_password" --value "hunter2"
+  ghcr.io/daringanitch/password-vault secret add --key "db_password" --value "hunter2"
 
 # 4. Create an access token
 docker run --rm \
   -e VAULT_MASTER_KEY \
   -v vault-data:/vault/data \
   --entrypoint vault-cli \
-  password-vault token create --name "ci-runner"
+  ghcr.io/daringanitch/password-vault token create --name "ci-runner"
 
 # 5. Start the API server
 docker run -d \
@@ -127,32 +158,31 @@ docker run -d \
   -p 8080:8080 \
   -e VAULT_MASTER_KEY \
   -v vault-data:/vault/data \
-  password-vault
+  ghcr.io/daringanitch/password-vault
 ```
 
 ### Run with Docker Compose
 
 ```bash
-# Start the API server (VAULT_MASTER_KEY must be exported or in .env)
+# VAULT_MASTER_KEY must be exported or in .env
 export VAULT_MASTER_KEY=<key>
 docker compose up -d
 
-# Run admin commands via the vault-cli service
-docker compose run --rm vault-cli token list
+# Admin commands via the vault-cli service
 docker compose run --rm vault-cli secret add --key "api_key" --value "sk-xxx"
+docker compose run --rm vault-cli token list
 
-# Stop
 docker compose down
 ```
 
 ### Makefile shortcuts
 
 ```bash
-make docker-build           # build image
-make docker-run             # run server (requires VAULT_MASTER_KEY)
-make docker-cli CMD="token list"   # run any vault-cli command
-make docker-compose-up      # start via docker compose
-make docker-compose-down    # stop
+make docker-build                    # build image
+make docker-run                      # start server (requires VAULT_MASTER_KEY)
+make docker-cli CMD="token list"     # run any vault-cli command
+make docker-compose-up               # start via docker compose
+make docker-compose-down             # stop
 ```
 
 ### Image details
@@ -166,22 +196,19 @@ make docker-compose-down    # stop
 | Filesystem | Read-only (only `/vault/data` volume is writable) |
 | Capabilities | All dropped |
 | Exposed port | `8080` |
-| Default volume | `/vault/data` (mount here for persistence) |
-| `VAULT_DB_PATH` default | `/vault/data/vault.db` |
+| Default volume | `/vault/data` |
 
-> **Never bake `VAULT_MASTER_KEY` into the image.** Always inject it at runtime via `-e` or a secrets manager (Docker Swarm secrets, Kubernetes secrets, AWS Secrets Manager, etc.).
+> **Never bake `VAULT_MASTER_KEY` into the image.** Inject it at runtime via `-e` or a secrets manager.
 
 ---
 
 ## API Reference
 
-The server exposes **two** endpoints only. There is intentionally no `GET /secrets`, no `POST /secret`, and no token management via HTTP.
+The server exposes **two endpoints only**. There is no `GET /secrets`, no `POST /secret`, and no token management via HTTP — all admin operations require CLI access to the host running the vault.
 
 ### `GET /secret/{key_name}`
 
 Retrieves a secret value. Requires a valid `Authorization: Bearer` token.
-
-**Request**
 
 ```
 GET /secret/github_token HTTP/1.1
@@ -189,13 +216,11 @@ Host: localhost:8080
 Authorization: Bearer <access_token>
 ```
 
-**Responses**
-
 | Status | Body | Condition |
 |--------|------|-----------|
 | `200 OK` | `{"value": "..."}` | Token valid AND key exists |
-| `404 Not Found` | `{"error": "not found"}` | Token invalid OR key missing (indistinguishable) |
-| `429 Too Many Requests` | — | Rate limit exceeded (5 req/s per IP) |
+| `404 Not Found` | `{"error": "not found"}` | Token invalid OR key missing — indistinguishable by design |
+| `429 Too Many Requests` | — | Rate limit exceeded |
 
 ```bash
 # Success
@@ -203,20 +228,17 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/secret/database_password
 # {"value":"super-secret-db-pass"}
 
-# Missing key (same response as bad token)
+# Missing key — same response as bad token
 curl -s -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/secret/does_not_exist
 # {"error":"not found"}
-
-# Bad token (same response as missing key)
-curl -s -H "Authorization: Bearer badtoken" \
-  http://localhost:8080/secret/database_password
-# {"error":"not found"}
 ```
+
+Response headers on `200`: `Cache-Control: no-store`, `Pragma: no-cache`.
 
 ### `GET /health`
 
-Health check. No authentication required.
+Unauthenticated health check for load balancers and container probes.
 
 ```bash
 curl -s http://localhost:8080/health
@@ -227,11 +249,9 @@ curl -s http://localhost:8080/health
 
 ## CLI Reference
 
-All commands except `init` require `VAULT_MASTER_KEY` to be exported.
+All commands except `init` require `VAULT_MASTER_KEY` to be set in the environment.
 
 ### `vault serve`
-
-Starts the HTTP API server.
 
 ```bash
 VAULT_MASTER_KEY=<key> vault serve
@@ -240,34 +260,22 @@ VAULT_MASTER_KEY=<key> vault serve
 
 ### `vault-cli init`
 
-Generates a new master key and initializes the database schema.
-If `VAULT_MASTER_KEY` is already set, skips key generation and just creates the DB.
+Generates a new master key and initializes the database. If `VAULT_MASTER_KEY` is already set, skips key generation and only creates the DB schema.
 
 ```bash
 vault-cli init [--db ./vault.db]
 ```
 
-```
-╔══════════════════════════════════════════════════════════════╗
-║              VAULT MASTER KEY — SAVE THIS NOW               ║
-╠══════════════════════════════════════════════════════════════╣
-║  VAULT_MASTER_KEY=abc123...
-╚══════════════════════════════════════════════════════════════╝
-Vault database initialized: ./vault.db
-```
-
-> The master key is shown **once**. There is no recovery if it is lost.
-
 ### `vault-cli secret`
 
 ```bash
-# Add a new secret (fails if key already exists)
+# Add (fails if key already exists)
 vault-cli secret add    --key "github_token"  --value "ghp_xxx"
 
-# Update an existing secret's value (fails if key doesn't exist)
+# Update (fails if key doesn't exist)
 vault-cli secret update --key "github_token"  --value "ghp_yyy"
 
-# Delete a secret permanently
+# Delete permanently
 vault-cli secret delete --key "github_token"
 ```
 
@@ -276,13 +284,13 @@ There is no `secret list` command — this is intentional.
 ### `vault-cli token`
 
 ```bash
-# Create an access token (raw token printed ONCE)
+# Create — raw token printed once
 vault-cli token create --name "ci-runner"
 
-# Revoke a token by name (takes effect within 5 minutes due to server cache)
+# Revoke — takes effect within 5 minutes (server-side cache TTL)
 vault-cli token revoke --name "ci-runner"
 
-# List all tokens — shows name and status, never the raw token
+# List — shows name and status only, never the raw token
 vault-cli token list
 ```
 
@@ -297,14 +305,14 @@ old-key     revoked  2025-12-01T00:00:00Z  never
 
 ## Configuration
 
-All configuration is via environment variables. See [`.env.example`](.env.example).
+All configuration via environment variables. See [`.env.example`](.env.example).
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `VAULT_MASTER_KEY` | **Yes** | — | Base64url-encoded 32-byte master key. Generate with `vault-cli init`. |
 | `VAULT_DB_PATH` | No | `./vault.db` | Path to the SQLite database file. |
 | `VAULT_PORT` | No | `8080` | TCP port the API server listens on. |
-| `VAULT_RATE_LIMIT` | No | `5` | Max API requests per second per client IP. |
+| `VAULT_RATE_LIMIT` | No | `5` | Max requests per second per client IP. |
 
 ---
 
@@ -313,60 +321,45 @@ All configuration is via environment variables. See [`.env.example`](.env.exampl
 ```
 password-vault/
 ├── cmd/
-│   ├── vault/
-│   │   └── main.go          # API server binary (vault serve)
-│   └── vault-cli/
-│       └── main.go          # Admin CLI binary
+│   ├── vault/main.go            # API server (vault serve)
+│   └── vault-cli/main.go        # Admin CLI
 ├── internal/
-│   ├── config/
-│   │   └── config.go        # Environment variable loading and validation
+│   ├── api/api.go               # HTTP handlers: GetSecret, Health
+│   ├── auth/auth.go             # Bearer token middleware + 5-min cache
 │   ├── crypto/
-│   │   ├── crypto.go        # HMAC, HKDF, AES-GCM, Argon2id, token generation
-│   │   └── crypto_test.go   # 14 unit tests for all crypto operations
-│   ├── db/
-│   │   └── db.go            # SQLite schema, CRUD (no list for secrets)
-│   ├── auth/
-│   │   └── auth.go          # chi middleware: Bearer token validation + cache
-│   ├── api/
-│   │   └── api.go           # HTTP handlers: GetSecret, Health
-│   └── ratelimit/
-│       └── ratelimit.go     # Per-IP token-bucket rate limiter
+│   │   ├── crypto.go            # HMAC, HKDF, AES-GCM, Argon2id, token generation
+│   │   └── crypto_test.go       # 14 unit tests
+│   ├── db/db.go                 # SQLite schema and CRUD (no secret listing)
+│   ├── config/config.go         # Env var loading and validation
+│   └── ratelimit/ratelimit.go   # Per-IP token-bucket limiter
 ├── docs/
-│   ├── security.md          # Cryptographic design and threat model
-│   └── architecture.md      # Component architecture and data flow
-├── .env.example             # Environment variable reference
-├── .gitignore
+│   ├── security.md              # Cryptographic design and threat model
+│   └── architecture.md          # Component diagrams and data flow
+├── .env.example
+├── Dockerfile
+├── docker-compose.yml
 ├── go.mod
 └── Makefile
 ```
-
-See [`docs/architecture.md`](docs/architecture.md) for component diagrams and data flow.
 
 ---
 
 ## Development
 
 ```bash
-# Run all tests (includes crypto round-trip and tamper detection)
-make test
-
-# Run only the crypto tests (fast, no network)
-make test-crypto
-
-# Lint
-make lint
-
-# Clean build artifacts
-make clean
+make test         # All tests with race detector and coverage
+make test-crypto  # Crypto unit tests only (fast)
+make lint         # go vet
+make clean        # Remove build artifacts
 ```
 
 ### Database schema
 
 ```sql
 CREATE TABLE secrets (
-    id            TEXT PRIMARY KEY,       -- UUID
+    id            TEXT PRIMARY KEY,       -- random UUID
     key_hash      TEXT UNIQUE NOT NULL,   -- HMAC-SHA256(master_key, key_name)
-    encrypted_val TEXT NOT NULL,          -- base64(nonce || AES-GCM ciphertext)
+    encrypted_val TEXT NOT NULL,          -- base64(nonce || AES-GCM ciphertext+tag)
     created_at    DATETIME NOT NULL,
     updated_at    DATETIME NOT NULL
 );
@@ -374,21 +367,21 @@ CREATE TABLE secrets (
 CREATE TABLE access_tokens (
     id           TEXT PRIMARY KEY,
     token_hash   TEXT UNIQUE NOT NULL,   -- Argon2id hash
-    token_sha256 TEXT UNIQUE NOT NULL,   -- SHA-256 for O(1) lookup
-    name         TEXT UNIQUE NOT NULL,   -- human label
+    token_sha256 TEXT UNIQUE NOT NULL,   -- SHA-256 for O(1) DB lookup
+    name         TEXT UNIQUE NOT NULL,
     created_at   DATETIME NOT NULL,
     last_used_at DATETIME,
     is_active    INTEGER NOT NULL DEFAULT 1
 );
 ```
 
-No plaintext key names, no audit log of which secrets were accessed.
+No plaintext key names. No audit log of which secrets were accessed.
 
 ### Key rotation
 
-There is no automated key rotation. To rotate the master key:
+There is no automated rotation. To rotate the master key:
 
-1. Use `vault-cli secret` to read and re-add each secret under a new master key (requires knowing all key names — keep your own inventory).
+1. Read and re-add each secret under a new master key using `vault-cli` (requires knowing all key names — maintain your own inventory separately).
 2. Update `VAULT_MASTER_KEY` and restart the server.
 
 ---
